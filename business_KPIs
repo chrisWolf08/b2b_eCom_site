@@ -1,30 +1,53 @@
+CREATE OR REPLACE TABLE `neogen-ga4-export.funnelPurchase_table.allUsers_businessKPIs` AS
 
 SELECT
   -- 1. Parse Date
   PARSE_DATE('%Y%m%d', _TABLE_SUFFIX) AS event_date,
-  COUNT(DISTINCT user_pseudo_id) AS total_users,
 
-  -- 3. Sessions (Using your specific logic)
-  -- We must CAST the int_value to STRING for CONCAT to work in BigQuery
+  -- 2. Traffic Metrics
+  COUNT(DISTINCT user_pseudo_id) AS total_users,
+  
   COUNT(DISTINCT CONCAT(
     user_pseudo_id, 
     CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
   )) AS sessions,
 
+  -- 3. Funnel Steps
+  
+  -- Step A: Add to Cart
   COUNT(DISTINCT CASE 
     WHEN event_name = 'add_to_cart' THEN user_pseudo_id 
     ELSE NULL 
-  END) AS users_with_add_to_cart, 
+  END) AS users_with_add_to_cart,
 
-    COUNT(DISTINCT CASE 
+  -- Step B: View Cart
+  COUNT(DISTINCT CASE 
     WHEN event_name = 'view_cart' THEN user_pseudo_id 
     ELSE NULL 
-  END) AS users_with_view_cart
+  END) AS users_with_view_cart,
+
+  -- Step C: Begin Checkout
+  COUNT(DISTINCT CASE 
+    WHEN event_name = 'begin_checkout' THEN user_pseudo_id 
+    ELSE NULL 
+  END) AS users_with_begin_CheckOut,
+
+  -- Step D: Transactions
+  COUNT(DISTINCT CASE 
+    WHEN ecommerce.transaction_id IS NOT NULL 
+         AND ecommerce.transaction_id != '(not set)' 
+    THEN user_pseudo_id 
+    ELSE NULL 
+  END) AS users_with_transaction
 
 FROM
   `neogen-ga4-export.analytics_331328809.events_*`
 WHERE
-  _TABLE_SUFFIX BETWEEN '20251125' AND FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+  _TABLE_SUFFIX BETWEEN '20250101' AND FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+  
+  -- HOSTNAME FILTER (Direct Field)
+  AND device.web_info.hostname = 'www.neogen.com'
+
 GROUP BY
   1
 ORDER BY
