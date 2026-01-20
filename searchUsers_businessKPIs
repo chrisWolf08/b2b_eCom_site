@@ -1,0 +1,72 @@
+CREATE OR REPLACE TABLE `neogen-ga4-export.funnelPurchase_table.searchUsers_businessKPIs` 
+AS
+WITH search_users_daily AS (
+ 
+  SELECT DISTINCT
+    user_pseudo_id,
+    _TABLE_SUFFIX
+  FROM
+    `neogen-ga4-export.analytics_331328809.events_*`
+  WHERE
+    _TABLE_SUFFIX BETWEEN '20250101' AND FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+    AND event_name = 'view_search_results'
+ 
+    AND device.web_info.hostname = 'www.neogen.com'
+)
+
+SELECT
+   PARSE_DATE('%Y%m%d', main._TABLE_SUFFIX) AS event_date,
+
+  -- 2. Traffic Metrics (Of Searchers Only)
+  COUNT(DISTINCT main.user_pseudo_id) AS total_users,
+  
+  COUNT(DISTINCT CONCAT(
+    main.user_pseudo_id, 
+    CAST((SELECT value.int_value FROM UNNEST(main.event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions,
+
+  -- 3. Funnel Steps (Of Searchers Only)
+  
+  -- Step A: Add to Cart
+  COUNT(DISTINCT CASE 
+    WHEN main.event_name = 'add_to_cart' THEN main.user_pseudo_id 
+    ELSE NULL 
+  END) AS users_with_add_to_cart,
+
+  -- Step B: View Cart
+  COUNT(DISTINCT CASE 
+    WHEN main.event_name = 'view_cart' THEN main.user_pseudo_id 
+    ELSE NULL 
+  END) AS users_with_view_cart,
+
+  -- Step C: Begin Checkout
+  COUNT(DISTINCT CASE 
+    WHEN main.event_name = 'begin_checkout' THEN main.user_pseudo_id 
+    ELSE NULL 
+  END) AS users_with_begin_checkout,
+
+  -- Step D: Transactions
+  COUNT(DISTINCT CASE 
+    WHEN main.ecommerce.transaction_id IS NOT NULL 
+         AND main.ecommerce.transaction_id != '(not set)' 
+    THEN main.user_pseudo_id 
+    ELSE NULL 
+  END) AS users_with_transaction
+
+FROM
+  `neogen-ga4-export.analytics_331328809.events_*` AS main
+INNER JOIN
+  search_users_daily AS searchers
+  -- CRITICAL: Only keep data if the User ID matches the list of Searchers for that specific day
+  ON main.user_pseudo_id = searchers.user_pseudo_id
+  AND main._TABLE_SUFFIX = searchers._TABLE_SUFFIX
+
+WHERE
+  main._TABLE_SUFFIX BETWEEN '20250101' AND FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+  -- Filter Main Data: Ensure metrics are only from the live site
+  AND main.device.web_info.hostname = 'www.neogen.com'
+
+GROUP BY
+  1
+ORDER BY
+  1 DESC;
