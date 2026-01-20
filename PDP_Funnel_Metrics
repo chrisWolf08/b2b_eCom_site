@@ -1,0 +1,90 @@
+CREATE OR REPLACE TABLE `neogen-ga4-export.funnelPurchase_table.pdp_Funnel_metrics`
+AS
+WITH raw_events AS (
+  SELECT
+    PARSE_DATE('%Y%m%d', _TABLE_SUFFIX) AS date,
+    user_pseudo_id,
+    event_name,
+    -- Construct Session ID
+    CONCAT(user_pseudo_id, CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)) AS session_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_location,
+    ecommerce.transaction_id
+  FROM
+    `neogen-ga4-export.analytics_331328809.events_*`
+  WHERE
+    _TABLE_SUFFIX BETWEEN '20250101' AND FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+    AND event_name IN ('page_view', 'screen_view', 'add_to_cart', 'view_cart', 'begin_checkout', 'purchase')
+    
+    -- 1. STRICT HOSTNAME FILTER
+    AND device.web_info.hostname = 'www.neogen.com'
+),
+
+-- 2. IDENTIFY SESSIONS WITH *STRICT* PDP VIEWS
+-- This isolates the "PDP Segment"
+pdp_sessions AS (
+  SELECT DISTINCT
+    date,
+    user_pseudo_id,
+    session_id
+  FROM
+    raw_events
+  WHERE
+    event_name IN ('page_view', 'screen_view')
+    
+    -- PDP LOGIC: Must be /categories/parent/product (at least two levels deep)
+    AND REGEXP_CONTAINS(page_location, r"/categories/.*/.+") 
+    
+    -- CLEANUP: Ensure we don't accidentally grab query param variations
+    AND NOT REGEXP_CONTAINS(page_location, r"(\?|&)variationCode=")
+),
+
+-- 3. CALCULATE SESSION OUTCOMES (The Funnel Flags)
+session_outcomes AS (
+  SELECT
+    session_id,
+    LOGICAL_OR(event_name = 'view_cart') AS has_view_cart,
+    LOGICAL_OR(event_name = 'add_to_cart') AS has_add_to_cart,
+    LOGICAL_OR(event_name = 'begin_checkout') AS has_begin_checkout,
+    -- Count Unique Transactions per Session
+    COUNT(DISTINCT CASE 
+      WHEN transaction_id IS NOT NULL AND transaction_id != '(not set)' THEN transaction_id 
+    END) AS distinct_transactions
+  FROM
+    raw_events
+  GROUP BY
+    1
+)
+
+-- 4. COMBINE AND AGGREGATE
+SELECT
+  ps.date,
+  
+  -- Metric 1: Total Users (Who viewed a PDP)
+  COUNT(DISTINCT ps.user_pseudo_id) AS total_users,
+
+  -- Metric 2: Total Sessions (Where a PDP was viewed)
+  COUNT(DISTINCT ps.session_id) AS total_sessions,
+
+  -- Metric 3: Users with View Cart
+  COUNT(DISTINCT CASE WHEN so.has_view_cart THEN ps.user_pseudo_id END) AS users_with_view_cart,
+
+  -- Metric 4: Users with Add to Cart
+  COUNT(DISTINCT CASE WHEN so.has_add_to_cart THEN ps.user_pseudo_id END) AS users_with_add_to_cart,
+
+  -- Metric 5: Users with Begin Checkout
+  COUNT(DISTINCT CASE WHEN so.has_begin_checkout THEN ps.user_pseudo_id END) AS users_with_begin_checkout,
+
+  -- Metric 6: Users with Transactions (Shoppers)
+  COUNT(DISTINCT CASE WHEN so.distinct_transactions > 0 THEN ps.user_pseudo_id END) AS users_with_transaction,
+  
+  -- Metric 7: Total Transactions (Orders)
+  SUM(COALESCE(so.distinct_transactions, 0)) AS total_transactions
+
+FROM
+  pdp_sessions ps
+LEFT JOIN
+  session_outcomes so USING (session_id)
+GROUP BY
+  1
+ORDER BY
+  date DESC;
